@@ -4,11 +4,12 @@ use log::warn;
 use noodles::bam;
 use noodles::core::Position;
 use noodles::sam;
-use noodles::sam::alignment::record::cigar::Op;
+use noodles::sam::alignment::record::{cigar::Op, Data};
 use noodles::sam::alignment::record::{Cigar, Name, Record};
-use noodles::sam::alignment::record_buf::RecordBuf;
-
-use std::io;
+use noodles::sam::alignment::record_buf::{Cigar as CigarBuf, RecordBuf};
+use noodles::sam::Header;
+use noodles::util::alignment;
+use std::{i32, io};
 
 // TODO: Look up alignment_span in noodles for how to parse the cigar string.
 
@@ -33,8 +34,9 @@ pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
     let header = reader.read_header()?;
 
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
-    let stdout = io::stdout().lock();
-    let mut writer = sam::io::Writer::new(stdout);
+    let mut writer = alignment::io::writer::builder::Builder::default()
+        .set_format(alignment::io::Format::Sam)
+        .build_from_writer(std::io::stdout().lock)?;
 
     // Loop through the SAM records.
     for result in reader.records() {
@@ -76,62 +78,11 @@ pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
 
         // At this point, we either need to split the read or just write it out
         if left_ref_len > reflen {
-            let (left_read, right_read) = split_read(left_read_len);
-            writer.write_alignment_record(&header, &left_read)?;
-            writer.write_alignment_record(&header, &right_read)?;
+            let (left_read, right_read) = split_read(&record, &header, left_read_len, record_start);
+            writer.write_record(&header, &left_read)?;
+            writer.write_record(&header, &right_read)?;
         } else {
-            writer.write_alignment_record(&header, &record)?;
-        }
-
-        if alignment_span >= reflen {
-            // Traverse the cigar operations and split the cigar
-            // string into two.
-
-            let (left, right) = split_cigar(&record.cigar(), record_start, reflen);
-
-            // Now update the record with cigar1, and then clone
-            // the record and update the alignment length and cigar with
-            // cigar2. The simplest way as far as I can tell to change the
-            // record cigar, unfortunately, is to create a completely new record.
-            let qs_left = &record.quality_scores().as_ref()[0..left.len()];
-            let seq_left = &record.sequence().as_ref()[0..left.len()];
-            let cigar_left = Cigar::from(left);
-
-            let left_rec = RecordBuf::builder()
-                .set_alignment_start(record_start)
-                .set_cigar(left.into_iter().collect())
-                .set_data(record.data().clone())
-                .set_flags(record.flags())
-                .set_mapping_quality(record.mapping_quality().unwrap())
-                .set_quality_scores(qs_left)
-                .set_read_name(*record.read_name().unwrap())
-                .set_reference_sequence_id(record.reference_sequence_id().unwrap())
-                .set_sequence(seq_left)
-                .set_template_length(left.len() as i32)
-                .build();
-
-            // Repeat for the right side
-            let readname_str: &str = record.read_name().unwrap().as_ref();
-            let readname_right = format!("{readname_str}_right");
-            let new_readname = Name::from_str(readname_right.as_str()).unwrap();
-
-            /*
-            let right_rec = sam::alignment::Record::builder()
-                .set_alignment_start(Position::new(1).unwrap())
-                .set_cigar(right.into_iter().collect())
-                .set_data(record.data().clone())
-                .set_flags(record.flags())
-                .set_mapping_quality(record.mapping_quality().unwrap())
-                .set_quality_scores(sam::record::QualityScores::from(new_qs))
-                .set_read_name(new_readname)
-                .set_reference_sequence_id(record.reference_sequence_id().unwrap())
-                .set_sequence(noodles_sam::record::Sequence::from(*new_sequence))
-                .set_template_length(right.len() as i32)
-                .build();
-            */
-        } else {
-            // Simply output the unchanged record.
-            writer.write_alignment_record(&header, &record)?;
+            writer.write_record(&header, &record)?;
         }
     }
 
@@ -141,63 +92,62 @@ pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
     Ok(())
 }
 
-/// Splits a SAM CIGAR record aligned across the boundary of a doubled reference
-/// genome back into a single copy linear genome. This process involves breaking
-/// the CIGAR string right at the boundary and adjusting the CIGAR Op at the
-/// breakpoint.
-fn split_cigar(cigar: &dyn Cigar, align_start: Position, reflen: usize) -> (Vec<Op>, Vec<Op>) {
-    // Loop through the CIGAR operations until we get to the operation
-    // that crosses the boundary of the reference. As we traverse `cigar`
-    // build a copy for cigar1.
-    let mut currlen = align_start; // current length of reference
-    let mut left_op_vec: Vec<Op> = vec![];
+// Split a read into two parts, and return both parts.
+fn split_read(
+    record: &noodles::bam::Record,
+    header: &Header,
+    at: usize,
+    record_start: Position,
+) -> (RecordBuf, RecordBuf) {
+    // Split the cigar string for the two reads
+    let left_cigar: CigarBuf = record
+        .cigar()
+        .iter()
+        .take(at)
+        .map(|x| x.ok().unwrap())
+        .collect();
+    let right_cigar = record.cigar().iter().skip(at).collect();
 
-    // First process the left side. I couldn't find a way to add an
-    // op to an existing vec, so we will have to destruct and rebuild
-    // the cigar strings. This approach seems to be very inefficient,
-    // but I don't see another way.
-    let mut op_iter = cigar.iter();
-    let mut target_op: Option<&Op> = None;
+    // Trim the quality scores
+    let left_quality_scores = record.quality_scores().into().iter().take(at);
+    let left_sequence = record.sequence().into().iter().take(at);
 
-    while let Some(op) = op_iter.next() {
-        let oplen = op
-            .kind()
-            .consumes_reference()
-            .then_some(op.len())
-            .unwrap_or(0);
+    // Create a new read alignment cloned from the record
+    let mut left_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
 
-        // Are we at the Op that crosses the boundary?
-        if currlen + oplen >= reflen {
-            target_op = Some(op);
-            break;
-        }
+    // Update the relevant changes in the read.
+    *left_read.alignment_start_mut() = Some(record_start);
+    *left_read.cigar_mut() = left_cigar;
+    *left_read.quality_scores_mut() = left_quality_scores;
+    *left_read.sequence_mut() = left_sequence;
+    *left_read.template_length_mut() = i32::try_from(at).unwrap();
 
-        // update the running reference length
-        currlen = currlen + oplen;
+    // Now the right read
+    let right_cigar = record
+        .cigar()
+        .iter()
+        .skip(at)
+        .map(|x| x.ok().unwrap())
+        .collect();
 
-        // Add the operations to the left side.
-        left_op_vec.push(*op);
-    }
+    // Trim the quality scores
+    let left_quality_scores = record.quality_scores().into().iter().take(at);
+    let left_sequence = record.sequence().into().iter().take(at);
 
-    // target_op better not be None or we have a logic error.
-    // split_op is the op we need to split.
-    let split_op = target_op.expect("Logic error!");
+    // Create a new read alignment cloned from the record
+    let mut right_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
 
-    // Compute the new left "op"
-    let left_op: cigar::Op = cigar::Op::new(split_op.kind(), reflen - currlen);
-    left_op_vec.push(left_op);
+    let right_quality_scores = record.quality_scores().into().iter().skip(at);
+    let right_sequence = record.sequence().into().iter().skip(at);
 
-    // Now the right op
-    let right_op: cigar::Op = cigar::Op::new(split_op.kind(), split_op.len() - left_op.len());
-    let mut right_op_vec: Vec<cigar::Op> = vec![right_op];
+    // Update the relevant changes in the read.
+    *right_read.alignment_start_mut() = Some(Position::MIN);
+    *right_read.cigar_mut() = right_cigar;
+    *right_read.quality_scores_mut() = right_quality_scores;
+    *right_read.sequence_mut() = right_sequence;
+    *right_read.template_length_mut() = right_read.template_length() - i32::try_from(at).unwrap();
 
-    // Add the rest of the ops.
-    while let Some(op) = op_iter.next() {
-        right_op_vec.push(*op);
-    }
-
-    // Finally convert the vector of Ops to a cigar string
-    (left_op_vec, right_op_vec)
+    (left_read, right_read)
 }
 
 // TESTING
