@@ -3,12 +3,13 @@
 use log::warn;
 use noodles::bam;
 use noodles::core::Position;
-use noodles::sam;
-use noodles::sam::alignment::record::{cigar::Op, Data};
-use noodles::sam::alignment::record::{Cigar, Name, Record};
-use noodles::sam::alignment::record_buf::{Cigar as CigarBuf, RecordBuf};
+use noodles::sam::alignment::io::Write;
+use noodles::sam::alignment::record_buf::{
+    Cigar as RecordBufCigar, QualityScores as RecordBufQS, Sequence as RecordBufSequence,
+};
+use noodles::sam::alignment::RecordBuf;
+use noodles::sam::io::Writer;
 use noodles::sam::Header;
-use noodles::util::alignment;
 use std::{i32, io};
 
 // TODO: Look up alignment_span in noodles for how to parse the cigar string.
@@ -27,16 +28,12 @@ use std::{i32, io};
 /// convert_bam(filename, reflen);
 /// ```
 pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
-    const MAX_CIGAR_LEN: usize = 1 << 16;
-
     // Open a reader to the file given.
     let mut reader = bam::io::reader::Builder.build_from_path(filename)?;
     let header = reader.read_header()?;
 
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
-    let mut writer = alignment::io::writer::builder::Builder::default()
-        .set_format(alignment::io::Format::Sam)
-        .build_from_writer(std::io::stdout().lock)?;
+    let mut writer = Writer::new(std::io::stdout().lock());
 
     // Loop through the SAM records.
     for result in reader.records() {
@@ -79,10 +76,10 @@ pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
         // At this point, we either need to split the read or just write it out
         if left_ref_len > reflen {
             let (left_read, right_read) = split_read(&record, &header, left_read_len, record_start);
-            writer.write_record(&header, &left_read)?;
-            writer.write_record(&header, &right_read)?;
+            writer.write_alignment_record(&header, &left_read)?;
+            writer.write_alignment_record(&header, &right_read)?;
         } else {
-            writer.write_record(&header, &record)?;
+            writer.write_alignment_record(&header, &record)?;
         }
     }
 
@@ -94,23 +91,27 @@ pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
 
 // Split a read into two parts, and return both parts.
 fn split_read(
-    record: &noodles::bam::Record,
+    record: &impl noodles::sam::alignment::Record,
     header: &Header,
     at: usize,
     record_start: Position,
 ) -> (RecordBuf, RecordBuf) {
     // Split the cigar string for the two reads
-    let left_cigar: CigarBuf = record
+    let left_cigar: RecordBufCigar = record
         .cigar()
         .iter()
         .take(at)
         .map(|x| x.ok().unwrap())
         .collect();
-    let right_cigar = record.cigar().iter().skip(at).collect();
+    let right_cigar: RecordBufCigar = record.cigar().iter().skip(at).map(|x| x.unwrap()).collect();
 
     // Trim the quality scores
-    let left_quality_scores = record.quality_scores().into().iter().take(at);
-    let left_sequence = record.sequence().into().iter().take(at);
+    let mut left_quality_scores_mut: Vec<u8> = record.quality_scores().iter().collect();
+    let right_quality_scores: Vec<u8> = left_quality_scores_mut.split_off(at);
+
+    // Trim the sequence
+    let mut left_sequence_mut: Vec<u8> = record.sequence().iter().collect();
+    let right_sequence = left_sequence_mut.split_off(at);
 
     // Create a new read alignment cloned from the record
     let mut left_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
@@ -118,33 +119,18 @@ fn split_read(
     // Update the relevant changes in the read.
     *left_read.alignment_start_mut() = Some(record_start);
     *left_read.cigar_mut() = left_cigar;
-    *left_read.quality_scores_mut() = left_quality_scores;
-    *left_read.sequence_mut() = left_sequence;
+    *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores_mut);
+    *left_read.sequence_mut() = RecordBufSequence::from(left_sequence_mut);
     *left_read.template_length_mut() = i32::try_from(at).unwrap();
-
-    // Now the right read
-    let right_cigar = record
-        .cigar()
-        .iter()
-        .skip(at)
-        .map(|x| x.ok().unwrap())
-        .collect();
-
-    // Trim the quality scores
-    let left_quality_scores = record.quality_scores().into().iter().take(at);
-    let left_sequence = record.sequence().into().iter().take(at);
 
     // Create a new read alignment cloned from the record
     let mut right_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
 
-    let right_quality_scores = record.quality_scores().into().iter().skip(at);
-    let right_sequence = record.sequence().into().iter().skip(at);
-
     // Update the relevant changes in the read.
     *right_read.alignment_start_mut() = Some(Position::MIN);
     *right_read.cigar_mut() = right_cigar;
-    *right_read.quality_scores_mut() = right_quality_scores;
-    *right_read.sequence_mut() = right_sequence;
+    *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
+    *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
     *right_read.template_length_mut() = right_read.template_length() - i32::try_from(at).unwrap();
 
     (left_read, right_read)
@@ -156,23 +142,69 @@ fn split_read(
 mod tests {
     use super::*;
 
-    const MTDNA_REF_LEN: usize = 16159;
+    use noodles::core::Position;
+    use noodles::sam::alignment::{
+        record::data::field::Tag, record::MappingQuality, record_buf::data::field::Value,
+        record_buf::Name, RecordBuf,
+    };
+    use noodles::sam::header::record::value::map::ReferenceSequence;
+    use noodles::sam::header::record::value::{map::Program, Map};
+    use noodles::sam::io::Reader;
+    use noodles::sam::record::Cigar;
+    use std::io;
+    use std::num::NonZeroUsize;
+
+    const REF_LEN: usize = 1000;
+    const READ_LEN: usize = 100;
 
     #[test]
-    fn test_split_cigar() {
-        let cigar = "20S30M5D5N40M10S"
-            .parse::<cigar::Cigar>()
-            .expect("FATAL: test_split_failed due to Cigar parse failure.");
+    fn test_split_read() -> io::Result<()> {
+        const SQ0_LN: NonZeroUsize = match NonZeroUsize::new(131072) {
+            Some(n) => n,
+            None => unreachable!(),
+        };
 
-        let (left, right) = split_cigar(&cigar, MTDNA_REF_LEN - 10, MTDNA_REF_LEN);
+        let header = noodles::sam::Header::builder()
+            .set_header(Default::default())
+            .add_program("split-read", Map::<Program>::default())
+            .add_comment("Testing split_read function.")
+            .add_reference_sequence("sq0", Map::<ReferenceSequence>::new(SQ0_LN))
+            .build();
 
-        println!("left: {:?}", left);
-        println!("right: {:?}", right);
+        let cigar = Cigar::new(b"20S30M5D5N40M10S");
 
-        let left_cigar: cigar::Cigar = left.into_iter().collect::<cigar::Cigar>();
-        let right_cigar: cigar::Cigar = right.into_iter().collect::<cigar::Cigar>();
+        // Generate some mapping qualities for testing
+        let quality_scores: Vec<_> = (0..READ_LEN)
+            .map(|i| (((i as f32) / 10.0 * 3.0 + 10.0) as u8))
+            .collect();
 
-        assert_eq!("20S10M".parse::<cigar::Cigar>(), Ok(left_cigar));
-        assert_eq!("20M5D5N40M10S".parse::<cigar::Cigar>(), Ok(right_cigar));
+        // Generate the sequence string
+        let sequence = b"ACGT".repeat(READ_LEN / 4);
+
+        // where in the reference, that the read starts
+        let record_start = REF_LEN - 30;
+
+        // Create a SAM record to split
+        let mut sam_record = RecordBuf::builder()
+            .set_data(
+                [
+                    (Tag::READ_GROUP, Value::from("rg0")),
+                    (Tag::ALIGNMENT_HIT_COUNT, Value::UInt8(1)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .set_alignment_start(Position::new(REF_LEN - 30).unwrap())
+            .set_reference_sequence_id(0)
+            .set_mapping_quality(MappingQuality::MIN)
+            .set_name(Name::from(b"Read1"))
+            .set_template_length(100)
+            .set_quality_scores(RecordBufQS::from(quality_scores))
+            .set_sequence(RecordBufSequence::from(sequence))
+            .build();
+
+        &split_read(&sam_record, &header, 50, Position::new(record_start));
+
+        Ok(())
     }
 }
