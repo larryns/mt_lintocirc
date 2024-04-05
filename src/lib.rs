@@ -143,16 +143,21 @@ mod tests {
     use super::*;
 
     use noodles::core::Position;
-    use noodles::sam::alignment::{
-        record::data::field::Tag, record::MappingQuality, record_buf::data::field::Value,
-        record_buf::Name, RecordBuf,
+    use noodles::sam::{
+        alignment::{
+            record::{
+                cigar::op::{Kind, Op},
+                data::field::Tag,
+                MappingQuality,
+            },
+            record_buf::{data::field::Value, Name, RecordBuf},
+        },
+        header::record::value::{
+            map::{Program, ReferenceSequence},
+            Map,
+        },
     };
-    use noodles::sam::header::record::value::map::ReferenceSequence;
-    use noodles::sam::header::record::value::{map::Program, Map};
-    use noodles::sam::io::Reader;
-    use noodles::sam::record::Cigar;
-    use std::io;
-    use std::num::NonZeroUsize;
+    use std::{io, num::NonZeroUsize};
 
     const REF_LEN: usize = 1000;
     const READ_LEN: usize = 100;
@@ -171,7 +176,16 @@ mod tests {
             .add_reference_sequence("sq0", Map::<ReferenceSequence>::new(SQ0_LN))
             .build();
 
-        let cigar = Cigar::new(b"20S30M5D5N40M10S");
+        let cigar: RecordBufCigar = [
+            Op::new(Kind::SoftClip, 20),
+            Op::new(Kind::Match, 30),
+            Op::new(Kind::Deletion, 5),
+            Op::new(Kind::Skip, 5),
+            Op::new(Kind::Match, 40),
+            Op::new(Kind::SoftClip, 10),
+        ]
+        .into_iter()
+        .collect();
 
         // Generate some mapping qualities for testing
         let quality_scores: Vec<_> = (0..READ_LEN)
@@ -185,7 +199,7 @@ mod tests {
         let record_start = REF_LEN - 30;
 
         // Create a SAM record to split
-        let mut sam_record = RecordBuf::builder()
+        let sam_record = RecordBuf::builder()
             .set_data(
                 [
                     (Tag::READ_GROUP, Value::from("rg0")),
@@ -200,10 +214,19 @@ mod tests {
             .set_name(Name::from(b"Read1"))
             .set_template_length(100)
             .set_quality_scores(RecordBufQS::from(quality_scores))
+            .set_cigar(cigar)
             .set_sequence(RecordBufSequence::from(sequence))
             .build();
 
-        &split_read(&sam_record, &header, 50, Position::new(record_start));
+        let (left_read, right_read) = split_read(
+            &sam_record,
+            &header,
+            50,
+            Position::new(record_start).unwrap(),
+        );
+
+        // print results, afterwards these printlns will be changed to asserts
+        println!("left = {:?}\nright = {:?}", left_read, right_read);
 
         Ok(())
     }
