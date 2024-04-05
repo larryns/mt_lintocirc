@@ -24,10 +24,10 @@ use std::{i32, io};
 /// # Example
 ///
 /// ```
-/// use mt_lintocirc::convert_bam;
-/// convert_bam(filename, reflen);
+/// use mt_lintocirc::convert_sam;
+/// convert_sam(filename, reflen);
 /// ```
-pub fn convert_bam(filename: &str, reflen: usize) -> io::Result<()> {
+pub fn convert_sam(filename: &str, reflen: usize) -> io::Result<()> {
     // Open a reader to the file given.
     let mut reader = bam::io::reader::Builder.build_from_path(filename)?;
     let header = reader.read_header()?;

@@ -4,7 +4,7 @@
 //! reference. The next step--accomplished by this program--is to convert the
 //! aligned reads back to an alignment of a circular mtDNA reference.
 
-use mt_lintocirc::convert_bam;
+use mt_lintocirc::convert_sam;
 use std::{env, io};
 
 fn main() -> io::Result<()> {
@@ -17,7 +17,7 @@ fn main() -> io::Result<()> {
     }
 
     // Process the bam file
-    convert_bam(&args[1], 16159)?;
+    convert_sam(&args[1], 16159)?;
 
     Ok(())
 }
