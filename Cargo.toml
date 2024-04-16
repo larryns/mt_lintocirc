@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-noodles = { version = "0.68.0", features = ["bam", "core", "sam" ] }
-
+noodles = { version = "0.69.0", features = ["bam", "core", "sam" ] }
+noodles-util = { version = "0.41.0", features = ["alignment"] }
 log = "0.4"

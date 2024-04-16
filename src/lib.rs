@@ -1,18 +1,24 @@
 //! Library (helper) modules for mt_lintocirc.
 
 use log::warn;
-use noodles::bam;
-use noodles::core::Position;
-use noodles::sam::alignment::io::Write;
-use noodles::sam::alignment::record_buf::{
-    Cigar as RecordBufCigar, QualityScores as RecordBufQS, Sequence as RecordBufSequence,
+use noodles::{
+    core::Position,
+    sam::{
+        alignment::{
+            io::Write,
+            record::cigar::{op::Kind, Cigar, Op},
+            record_buf::{
+                Cigar as RecordBufCigar, QualityScores as RecordBufQS,
+                Sequence as RecordBufSequence,
+            },
+            Record, RecordBuf,
+        },
+        io::Writer,
+        Header,
+    },
 };
-use noodles::sam::alignment::RecordBuf;
-use noodles::sam::io::Writer;
-use noodles::sam::Header;
-use std::{i32, io};
-
-// TODO: Look up alignment_span in noodles for how to parse the cigar string.
+use noodles_util::alignment::io::Reader;
+use std::io::{self, BufRead};
 
 // For writing we are going to use the simpler, but less efficient std::io
 // writer, as opposed to the faster, but more complex tokio::async::writer.
@@ -25,115 +31,141 @@ use std::{i32, io};
 ///
 /// ```
 /// use mt_lintocirc::convert_sam;
-/// convert_sam(filename, reflen);
+/// convert_sam(a generic bam/sam reader, reflen);
 /// ```
-pub fn convert_sam(filename: &str, reflen: usize) -> io::Result<()> {
-    // Open a reader to the file given.
-    let mut reader = bam::io::reader::Builder.build_from_path(filename)?;
+pub fn convert_sam<T>(reader: &mut Reader<Box<dyn BufRead>>, reflen: usize) -> io::Result<()> {
     let header = reader.read_header()?;
 
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
     let mut writer = Writer::new(std::io::stdout().lock());
 
     // Loop through the SAM records.
-    for result in reader.records() {
+    for result in reader.records(&header) {
         let record = result?;
 
-        // We are only looking for reads that are longer than `reflen`
-        // First get the read alignment end.
-        let Some(Ok(record_start)) = record.alignment_start() else {
-            let read_name = record.name().expect("UNKNOWN read name!");
-
-            warn!("Record:{:?} does not have a start.", read_name.as_bytes());
-            continue;
-        };
-
-        // We need to build two new reads. Based on how this library is designed,
-        // we can't just modify one read. First, we build the left read. We will
-        // need a new (shorter) sequence, qualities, cigar string, template length,
-        let mut left_ref_len: usize = record_start.get();
-        let mut left_read_len: usize = 0;
-
-        // Traverse the read to check if we go past the end of the reference genome.
-        for opiter in record.cigar().iter() {
-            let oper = opiter?;
-
-            if oper.kind().consumes_reference() {
-                left_ref_len += 1;
-
-                // check if we are at the boundary of the reference
-                if left_ref_len > reflen {
-                    // We need to split the read.
-                    break;
-                }
-            }
-
-            if oper.kind().consumes_read() {
-                left_read_len += 1;
-            }
-        }
-
-        // At this point, we either need to split the read or just write it out
-        if left_ref_len > reflen {
-            let (left_read, right_read) = split_read(&record, &header, left_read_len, record_start);
-            writer.write_alignment_record(&header, &left_read)?;
-            writer.write_alignment_record(&header, &right_read)?;
+        if let Some(reads) = convert_read(&record, &header, reflen) {
+            // If we get a left and right read then write them separately.
+            writer.write_alignment_record(&header, &reads.0)?;
+            writer.write_alignment_record(&header, &reads.1)?;
         } else {
+            // Otherwise, we didn't split the read or there was a problem, in which
+            // case just write the original read unchanged.
             writer.write_alignment_record(&header, &record)?;
         }
     }
 
     // Close the writer
-    writer.finish(&header)?;
-
-    Ok(())
+    writer.finish(&header)
 }
 
-// Split a read into two parts, and return both parts.
-fn split_read(
-    record: &impl noodles::sam::alignment::Record,
+fn convert_read(
+    record: &impl Record,
     header: &Header,
-    at: usize,
-    record_start: Position,
-) -> (RecordBuf, RecordBuf) {
-    // Split the cigar string for the two reads
-    let left_cigar: RecordBufCigar = record
-        .cigar()
-        .iter()
-        .take(at)
-        .map(|x| x.ok().unwrap())
-        .collect();
-    let right_cigar: RecordBufCigar = record.cigar().iter().skip(at).map(|x| x.unwrap()).collect();
+    reflen: usize,
+) -> Option<(RecordBuf, RecordBuf)> {
+    // We are only looking for reads that are longer than `reflen`
+    // First get the read alignment end.
+    let Some(Ok(record_start)) = record.alignment_start() else {
+        let read_name = record.name().expect("UNKNOWN read name!");
+
+        warn!("Record:{:?} does not have a start.", read_name.as_bytes());
+        return None;
+    };
+
+    // Parse the cigar vector to check if we need to split this read.
+    let mut left_ref_len: usize = record_start.get();
+    let mut remaining_len: usize = 0;
+    let mut curr_oper_kind = Kind::Skip;
+    let mut left_cigar = Vec::new();
+    let mut sequence_idx: usize = 0; // Used to index the sequence/qual scores
+
+    let cigar_vec: Vec<Op> = record.cigar().iter().map(|x| x.ok().unwrap()).collect();
+    let mut opiter = cigar_vec.iter();
+
+    while let Some(oper) = opiter.next() {
+        // Do we advance the reference count?
+        if oper.kind().consumes_reference() {
+            // If we go beyond the reference length, then we need to split this op
+            if left_ref_len + oper.len() > reflen {
+                // Split the oper len
+                let curr_oper_len = reflen - left_ref_len;
+
+                // Remaining len is the right size of the split from the operator.
+                remaining_len = oper.len() - curr_oper_len;
+                curr_oper_kind = oper.kind();
+
+                // Add the truncated operator to the left cigar
+                left_cigar.push(Op::new(oper.kind(), curr_oper_len));
+
+                // We're done creating the left cigar. Check if we also need to advance
+                // the read, then break out of the loop.
+                if oper.kind().consumes_read() {
+                    sequence_idx += oper.len();
+                }
+
+                break;
+            }
+
+            // Otherwise just advance the reference counters.
+            left_ref_len += oper.len();
+
+            // Add to the left cigar
+            left_cigar.push(oper.clone());
+        }
+
+        // Move along the read?
+        if oper.kind().consumes_read() {
+            sequence_idx += oper.len()
+        }
+    }
+
+    // Update the sequence and the quality scores for the left read.
+    // Trim the sequence
+    let mut left_sequence_mut: Vec<u8> = record.sequence().iter().collect();
+    let right_sequence = left_sequence_mut.split_off(sequence_idx);
 
     // Trim the quality scores
     let mut left_quality_scores_mut: Vec<u8> = record.quality_scores().iter().collect();
-    let right_quality_scores: Vec<u8> = left_quality_scores_mut.split_off(at);
+    let right_quality_scores: Vec<u8> = left_quality_scores_mut.split_off(sequence_idx);
 
-    // Trim the sequence
-    let mut left_sequence_mut: Vec<u8> = record.sequence().iter().collect();
-    let right_sequence = left_sequence_mut.split_off(at);
+    // We're done with the left cigar. Check if there wa a split operator.
+    // If so, add the right split part of the op to the right cigar.
+    let mut right_cigar = Vec::new();
 
+    if remaining_len > 0 {
+        right_cigar.push(Op::new(curr_oper_kind, remaining_len));
+    }
+
+    // Then simply add the rest of the cigar
+    while let Some(oper) = opiter.next() {
+        right_cigar.push(oper.clone());
+    }
+
+    // If there's nothing in the right cigar, then there's no split.
+    if right_cigar.len() == 0 {
+        return None;
+    }
+
+    // Now create the left and right reads.
     // Create a new read alignment cloned from the record
     let mut left_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
 
     // Update the relevant changes in the read.
     *left_read.alignment_start_mut() = Some(record_start);
-    *left_read.cigar_mut() = left_cigar;
+    *left_read.cigar_mut() = RecordBufCigar::from(left_cigar);
     *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores_mut);
     *left_read.sequence_mut() = RecordBufSequence::from(left_sequence_mut);
-    *left_read.template_length_mut() = i32::try_from(at).unwrap();
 
     // Create a new read alignment cloned from the record
     let mut right_read = RecordBuf::try_from_alignment_record(header, record).unwrap();
 
     // Update the relevant changes in the read.
     *right_read.alignment_start_mut() = Some(Position::MIN);
-    *right_read.cigar_mut() = right_cigar;
+    *right_read.cigar_mut() = RecordBufCigar::from(right_cigar);
     *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
     *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
-    *right_read.template_length_mut() = right_read.template_length() - i32::try_from(at).unwrap();
 
-    (left_read, right_read)
+    Some((left_read, right_read))
 }
 
 // TESTING
@@ -208,7 +240,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             )
-            .set_alignment_start(Position::new(REF_LEN - 30).unwrap())
+            .set_alignment_start(Position::new(record_start).unwrap())
             .set_reference_sequence_id(0)
             .set_mapping_quality(MappingQuality::MIN)
             .set_name(Name::from(b"Read1"))
@@ -218,15 +250,14 @@ mod tests {
             .set_sequence(RecordBufSequence::from(sequence))
             .build();
 
-        let (left_read, right_read) = split_read(
-            &sam_record,
-            &header,
-            50,
-            Position::new(record_start).unwrap(),
-        );
+        let (left_read, right_read) = convert_read(&sam_record, &header, 50).unwrap();
+
+        // Check the parameters of the left and right reads.
 
         // print results, afterwards these printlns will be changed to asserts
         println!("left = {:?}\nright = {:?}", left_read, right_read);
+
+        assert!(false);
 
         Ok(())
     }

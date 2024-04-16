@@ -5,19 +5,22 @@
 //! aligned reads back to an alignment of a circular mtDNA reference.
 
 use mt_lintocirc::convert_sam;
-use std::{env, io};
+use noodles::sam::alignment::Record;
+use noodles_util::alignment::io::reader::Builder;
+use std::{env, io, path::PathBuf};
 
 fn main() -> io::Result<()> {
     // collect turns the iterator "args" into a vector.
-    let args: Vec<String> = env::args().collect();
+    let mut args = env::args();
+    let filename = args
+        .nth(1)
+        .map(PathBuf::from)
+        .expect(format!("Usage: {} <input sam/bam", args.nth(0).unwrap()).as_str());
 
-    if args.len() != 2 {
-        eprintln!("Usage: {} <input bam>.", args[0]);
-        return Ok(());
-    }
+    let mut reader = Builder::default().build_from_path(filename)?;
 
     // Process the bam file
-    convert_sam(&args[1], 16159)?;
+    convert_sam::<Box<dyn Record>>(&mut reader, 16159)?;
 
     Ok(())
 }
