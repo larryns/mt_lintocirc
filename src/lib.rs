@@ -74,6 +74,8 @@ fn convert_read(
 
     // Parse the cigar vector to check if we need to split this read.
     let mut left_ref_len: usize = record_start.get();
+    assert!(left_ref_len < reflen, "Read aligns past the reference, logic error.");
+                
     let mut remaining_len: usize = 0;
     let mut curr_oper_kind = Kind::Skip;
     let mut left_cigar = Vec::new();
@@ -250,7 +252,7 @@ mod tests {
             .set_sequence(RecordBufSequence::from(sequence))
             .build();
 
-        let (left_read, right_read) = convert_read(&sam_record, &header, 50).unwrap();
+        let (left_read, right_read) = convert_read(&sam_record, &header, REF_LEN).unwrap();
 
         // Check the parameters of the left and right reads.
 
