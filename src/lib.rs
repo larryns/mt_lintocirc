@@ -27,12 +27,6 @@ use std::io::{self, BufRead};
 /// doubled circular reference genome--a reference in which the linear reference
 /// genome is doubled--back to a single copy linear reference genome.
 ///
-/// # Example
-///
-/// ```
-/// use mt_lintocirc::convert_sam;
-/// convert_sam(a generic bam/sam reader, reflen);
-/// ```
 pub fn convert_sam<T>(reader: &mut Reader<Box<dyn BufRead>>, reflen: usize) -> io::Result<()> {
     let header = reader.read_header()?;
 
@@ -74,8 +68,11 @@ fn convert_read(
 
     // Parse the cigar vector to check if we need to split this read.
     let mut left_ref_len: usize = record_start.get();
-    assert!(left_ref_len < reflen, "Read aligns past the reference, logic error.");
-                
+    assert!(
+        left_ref_len < reflen,
+        "Read aligns past the reference, logic error."
+    );
+
     let mut remaining_len: usize = 0;
     let mut curr_oper_kind = Kind::Skip;
     let mut left_cigar = Vec::new();
@@ -102,7 +99,7 @@ fn convert_read(
                 // We're done creating the left cigar. Check if we also need to advance
                 // the read, then break out of the loop.
                 if oper.kind().consumes_read() {
-                    sequence_idx += oper.len();
+                    sequence_idx += curr_oper_len;
                 }
 
                 break;
@@ -119,7 +116,11 @@ fn convert_read(
         if oper.kind().consumes_read() {
             sequence_idx += oper.len()
         }
+        eprintln!("left_ref_len = {}, reflen = {}", left_ref_len, reflen);
+        eprintln!("sequence_idx = {}", sequence_idx);
     }
+    eprintln!("left_ref_len = {}", left_ref_len);
+    eprintln!("sequence_idx = {}", sequence_idx);
 
     // Update the sequence and the quality scores for the left read.
     // Trim the sequence
@@ -194,7 +195,6 @@ mod tests {
     use std::{io, num::NonZeroUsize};
 
     const REF_LEN: usize = 1000;
-    const READ_LEN: usize = 100;
 
     #[test]
     fn test_split_read() -> io::Result<()> {
@@ -210,27 +210,41 @@ mod tests {
             .add_reference_sequence("sq0", Map::<ReferenceSequence>::new(SQ0_LN))
             .build();
 
+        /* --------------------------------------------
+         * | Operation | Read Index | Reference Index |
+         * ------------+------------+-----------------|
+         * | S20       |         20 |               0 |
+         * | M30       |         50 |              30 |
+         * | D5        |         50 |              35 |
+         * | N5        |         50 |              40 |
+         * | M90       |        140 |             130 |
+         * | S10       |        150 |             130 |
+         * --------------------------------------------
+         *
+         * Position 100 (starting at 1) is where we would like to split. At position 100
+         * in the read, the reference is 10bp behind, i.e. 90bp along the reference.
+         */
         let cigar: RecordBufCigar = [
             Op::new(Kind::SoftClip, 20),
             Op::new(Kind::Match, 30),
             Op::new(Kind::Deletion, 5),
             Op::new(Kind::Skip, 5),
-            Op::new(Kind::Match, 40),
+            Op::new(Kind::Match, 90),
             Op::new(Kind::SoftClip, 10),
         ]
         .into_iter()
         .collect();
 
         // Generate some mapping qualities for testing
-        let quality_scores: Vec<_> = (0..READ_LEN)
-            .map(|i| (((i as f32) / 10.0 * 3.0 + 10.0) as u8))
-            .collect();
+        // Convert the quality scores from string/PHRED scores to usize.
+        let quality_scores = b"0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDE!FGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@AB".to_vec();
 
-        // Generate the sequence string
-        let sequence = b"ACGT".repeat(READ_LEN / 4);
+        // Generate the sequence string. In this case our string is just ACGT repeated.
+        // "N" marks position 100--where we are going to cut the read.
+        let sequence = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTNACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA";
 
-        // where in the reference, that the read starts
-        let record_start = REF_LEN - 30;
+        // where in the reference that the read starts. See note about cigar string above.
+        let record_start = REF_LEN - 90;
 
         // Create a SAM record to split
         let sam_record = RecordBuf::builder()
@@ -255,11 +269,106 @@ mod tests {
         let (left_read, right_read) = convert_read(&sam_record, &header, REF_LEN).unwrap();
 
         // Check the parameters of the left and right reads.
+        assert!(
+            left_read.sequence().as_ref()
+                == b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+                "left_read sequence mismatch, sequence={:?}, len={}", left_read.sequence().as_ref(), left_read.sequence().len()
+        );
+        assert!(
+            right_read.sequence().as_ref() == b"NACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA",
+            "right_read sequence mismatch, sequence={:?}, len={}",
+            right_read.sequence().as_ref(),
+            right_read.sequence().len()
+        );
+        assert!(
+            left_read.quality_scores().as_ref() == b"0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDE",
+            "left_read quality mismatch, quality scores={:?}", 
+            left_read.quality_scores().as_ref()
+        );
+        assert!(
+            right_read.quality_scores().as_ref()
+                == b"!FGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@AB",
+            "right_read quality mismatch, quality scores={:?}",
+            right_read.quality_scores().as_ref()
+        );
 
-        // print results, afterwards these printlns will be changed to asserts
-        println!("left = {:?}\nright = {:?}", left_read, right_read);
+        Ok(())
+    }
 
-        assert!(false);
+    #[test]
+    fn test_nosplit_read() -> io::Result<()> {
+        const SQ0_LN: NonZeroUsize = match NonZeroUsize::new(131072) {
+            Some(n) => n,
+            None => unreachable!(),
+        };
+
+        let header = noodles::sam::Header::builder()
+            .set_header(Default::default())
+            .add_program("nonsplit-read", Map::<Program>::default())
+            .add_comment("Testing non split read function.")
+            .add_reference_sequence("sq0", Map::<ReferenceSequence>::new(SQ0_LN))
+            .build();
+
+        /* --------------------------------------------
+         * | Operation | Read Index | Reference Index |
+         * ------------+------------+-----------------|
+         * | S20       |         20 |               0 |
+         * | M30       |         50 |              30 |
+         * | D5        |         50 |              35 |
+         * | N5        |         50 |              40 |
+         * | M90       |        140 |             130 |
+         * | S10       |        150 |             130 |
+         * --------------------------------------------
+         *
+         * Position 100 (starting at 1) is where we would like to split. At position 100
+         * in the read, the reference is 10bp behind, i.e. 90bp along the reference.
+         */
+        let cigar: RecordBufCigar = [
+            Op::new(Kind::SoftClip, 20),
+            Op::new(Kind::Match, 30),
+            Op::new(Kind::Deletion, 5),
+            Op::new(Kind::Skip, 5),
+            Op::new(Kind::Match, 90),
+            Op::new(Kind::SoftClip, 10),
+        ]
+        .into_iter()
+        .collect();
+
+        // Generate some mapping qualities for testing
+        // Convert the quality scores from string/PHRED scores to usize.
+        let quality_scores = b"0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDE!FGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@AB".to_vec();
+
+        // Generate the sequence string. In this case our string is just ACGT repeated.
+        // "N" marks position 100--where we are going to cut the read.
+        let sequence = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTNACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA";
+
+        // where in the reference that the read starts. See note about cigar string above.
+        // This starting point will make the read go over the reference by 5bp, but soft-clipping
+        // doesn't consume the reference, so we won't be over the reference.
+        let record_start = REF_LEN - 145;
+
+        // Create a SAM record to split
+        let sam_record = RecordBuf::builder()
+            .set_data(
+                [
+                    (Tag::READ_GROUP, Value::from("rg0")),
+                    (Tag::ALIGNMENT_HIT_COUNT, Value::UInt8(1)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .set_alignment_start(Position::new(record_start).unwrap())
+            .set_reference_sequence_id(0)
+            .set_mapping_quality(MappingQuality::MIN)
+            .set_name(Name::from(b"Read1"))
+            .set_template_length(100)
+            .set_quality_scores(RecordBufQS::from(quality_scores))
+            .set_cigar(cigar)
+            .set_sequence(RecordBufSequence::from(sequence))
+            .build();
+
+        let result = convert_read(&sam_record, &header, REF_LEN);
+        assert!(result.is_none(), "Result is not none.");
 
         Ok(())
     }
