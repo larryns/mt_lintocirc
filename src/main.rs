@@ -8,14 +8,14 @@ use clap::{Arg, Command};
 use mt_lintocirc::convert_sam;
 use noodles::sam::alignment::Record;
 use noodles_util::alignment::io::reader::Builder;
-use std::{env, io, path::PathBuf};
+use std::io;
 
 fn main() -> io::Result<()> {
     const PROG_NAME: &str = "mt_lintocirc";
     const VERSION: &str = "0.0.1";
     const EMAIL: &str = "Larry N. Singh <larrynsingh@gmail.com>";
 
-    let mut app = Command::new(PROG_NAME)
+    let matches: clap::ArgMatches = Command::new(PROG_NAME)
             .version(VERSION)
             .author(EMAIL)
             .about("Converts BAM/SAM files mapped to doubled linear chromosome to a single linear chromosome.")
@@ -24,8 +24,7 @@ fn main() -> io::Result<()> {
                     .help("The input file to process")
                     .required(true) // Set to false to manually handle missing arguments
                     .index(1),
-            );
-    let matches = app.get_matches_mut();
+            ).get_matches();
 
     if let Some(filename) = matches.get_one::<String>("alignmentfile") {
         println!("Processing file: {}", filename);
@@ -35,6 +34,6 @@ fn main() -> io::Result<()> {
         // Process the bam file
         convert_sam::<Box<dyn Record>>(&mut reader, 16159)
     } else {
-        app.print_help()
+        Ok(())
     }
 }
