@@ -37,7 +37,46 @@ pub fn convert_sam<T>(reader: &mut Reader<Box<dyn BufRead>>, reflen: usize) -> i
     for result in reader.records(&header) {
         let record = result?;
 
+        // Remove the following 3 lines
+        let read_name_ref = record.name().unwrap();
+        let read_name = std::str::from_utf8(read_name_ref.as_bytes()).unwrap();
+
         if let Some(reads) = convert_read(&record, &header, reflen) {
+            let read_name_ref0 = reads.0.name().unwrap();
+            let read_name0 = std::str::from_utf8(read_name_ref0.as_ref()).unwrap();
+
+            /*
+            println!("--------------------------------------------------");
+            reads
+                .0
+                .cigar()
+                .iter()
+                .map(|opres| opres.unwrap())
+                .filter_map(|op| op.kind().consumes_read().then_some(op))
+                .for_each(|op| println!("{:?}\t{}", op.kind(), op.len()));
+                */
+
+            let cigar_read_len = reads.0.cigar().read_length();
+            assert!(
+                cigar_read_len == reads.0.sequence().len(),
+                "Read 0: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
+                reads.0.cigar().read_length(),
+                reads.0.sequence().len(),
+                read_name0,
+                reads.0.alignment_start().unwrap().get()
+            );
+
+            let read_name_ref1 = reads.1.name().unwrap();
+            let read_name1 = std::str::from_utf8(read_name_ref1.as_ref()).unwrap();
+            assert!(
+                reads.1.cigar().read_length() == reads.1.sequence().len(),
+                "Read 1: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
+                reads.1.cigar().read_length(),
+                reads.1.sequence().len(),
+                read_name1,
+                reads.1.alignment_start().unwrap().get()
+            );
+
             // If we get a left and right read then write them separately.
             writer.write_alignment_record(&header, &reads.0)?;
             writer.write_alignment_record(&header, &reads.1)?;
@@ -62,15 +101,25 @@ fn convert_read(
     let Some(Ok(record_start)) = record.alignment_start() else {
         let read_name = record.name().expect("UNKNOWN read name!");
 
-        warn!("Record:{:?} does not have a start.", read_name.as_bytes());
+        log::warn!("Record:{:?} does not have a start.", read_name.as_bytes());
         return None;
     };
 
+    // Remove later.
+    let name = record.name().unwrap();
+    let namestr = std::str::from_utf8(name.as_bytes()).unwrap();
+
     // Parse the cigar vector to check if we need to split this read.
     let mut left_ref_len: usize = record_start.get();
+
+    // Often to handle a circular chromosome, the reference genome is doubled.
+    // Doing so is a mistake and unnecessary because sometimes the entire 
+    // read will end up aligning entirely in the duplicated reference sequence.
+    // To prevent this situation, the repeated part of the reference genome
+    // should be no more than half of the longest expected read length.
     assert!(
         left_ref_len < reflen,
-        "Read aligns past the reference, logic error."
+        "Read: {}, aligns past the reference, logic error. left_ref_len={}, reflen={}.", namestr, left_ref_len, reflen
     );
 
     let mut remaining_len: usize = 0;
@@ -80,6 +129,7 @@ fn convert_read(
 
     let cigar_vec: Vec<Op> = record.cigar().iter().map(|x| x.ok().unwrap()).collect();
     let mut opiter = cigar_vec.iter();
+
 
     while let Some(oper) = opiter.next() {
         // Do we advance the reference count?
@@ -107,20 +157,16 @@ fn convert_read(
 
             // Otherwise just advance the reference counters.
             left_ref_len += oper.len();
-
-            // Add to the left cigar
-            left_cigar.push(oper.clone());
         }
 
         // Move along the read?
         if oper.kind().consumes_read() {
             sequence_idx += oper.len()
         }
-        eprintln!("left_ref_len = {}, reflen = {}", left_ref_len, reflen);
-        eprintln!("sequence_idx = {}", sequence_idx);
+        
+        // Add the operator
+        left_cigar.push(oper.clone());
     }
-    eprintln!("left_ref_len = {}", left_ref_len);
-    eprintln!("sequence_idx = {}", sequence_idx);
 
     // Update the sequence and the quality scores for the left read.
     // Trim the sequence

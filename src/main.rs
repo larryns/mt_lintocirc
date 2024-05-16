@@ -27,7 +27,7 @@ fn main() -> io::Result<()> {
             ).get_matches();
 
     if let Some(filename) = matches.get_one::<String>("alignmentfile") {
-        println!("Processing file: {}", filename);
+        log::info!("Processing file: {}", filename);
 
         let mut reader = Builder::default().build_from_path(filename)?;
 
