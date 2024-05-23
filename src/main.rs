@@ -8,7 +8,10 @@ use clap::{Arg, Command};
 use mt_lintocirc::convert_sam;
 use noodles::sam::alignment::Record;
 use noodles_util::alignment::io::reader::Builder;
-use std::io;
+use std::{
+    fs::File,
+    io::{self, BufWriter, Write},
+};
 
 fn main() -> io::Result<()> {
     const PROG_NAME: &str = "mt_lintocirc";
@@ -19,6 +22,11 @@ fn main() -> io::Result<()> {
             .version(VERSION)
             .author(EMAIL)
             .about("Converts BAM/SAM files mapped to doubled linear chromosome to a single linear chromosome.")
+            .arg(
+                Arg::new("output")
+                   .short('o')
+                   .help("output sam file")
+            )
             .arg(
                 Arg::new("alignmentfile")
                     .help("The input file to process")
@@ -31,8 +39,18 @@ fn main() -> io::Result<()> {
 
         let mut reader = Builder::default().build_from_path(filename)?;
 
+        // Get the output file name
+        let mut bufwriter: Box<dyn Write> =
+            if let Some(output_filename) = matches.get_one::<String>("name") {
+                let output_file = File::create_new(output_filename)?;
+
+                Box::new(BufWriter::new(output_file))
+            } else {
+                Box::new(BufWriter::new(std::io::stdout().lock()))
+            };
+
         // Process the bam file
-        convert_sam::<Box<dyn Record>>(&mut reader, 16159)
+        convert_sam::<Box<dyn Record>>(&mut reader, 16159, &mut bufwriter)
     } else {
         Ok(())
     }

@@ -1,6 +1,5 @@
 //! Library (helper) modules for mt_lintocirc.
 
-use log::warn;
 use noodles::{
     core::Position,
     sam::{
@@ -18,72 +17,84 @@ use noodles::{
     },
 };
 use noodles_util::alignment::io::Reader;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write as StdWrite};
 
 // For writing we are going to use the simpler, but less efficient std::io
 // writer, as opposed to the faster, but more complex tokio::async::writer.
+
+// The return type from the convert read.
+enum SplitType {
+    Unchanged,           // No change to the input read
+    Modified(RecordBuf), // Read modified, but not split
+    Split(RecordBuf, RecordBuf),
+}
 
 /// Converts SAM records in an alignment file that were aligned to a
 /// doubled circular reference genome--a reference in which the linear reference
 /// genome is doubled--back to a single copy linear reference genome.
 ///
-pub fn convert_sam<T>(reader: &mut Reader<Box<dyn BufRead>>, reflen: usize) -> io::Result<()> {
+pub fn convert_sam<T>(
+    reader: &mut Reader<Box<dyn BufRead>>,
+    reflen: usize,
+    bufwriter: &mut Box<dyn StdWrite>,
+) -> io::Result<()> {
     let header = reader.read_header()?;
 
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
-    let mut writer = Writer::new(std::io::stdout().lock());
+    let mut writer = Writer::new(bufwriter);
 
     // Loop through the SAM records.
     for result in reader.records(&header) {
         let record = result?;
 
-        // Remove the following 3 lines
-        let read_name_ref = record.name().unwrap();
-        let read_name = std::str::from_utf8(read_name_ref.as_bytes()).unwrap();
+        // Remove the following 2 lines
+        //let read_name_ref = record.name().unwrap();
+        //let read_name = std::str::from_utf8(read_name_ref.as_bytes()).unwrap();
 
-        if let Some(reads) = convert_read(&record, &header, reflen) {
-            let read_name_ref0 = reads.0.name().unwrap();
-            let read_name0 = std::str::from_utf8(read_name_ref0.as_ref()).unwrap();
+        let read_type = convert_read(&record, &header, reflen);
+        match read_type {
+            SplitType::Unchanged => writer.write_alignment_record(&header, &record)?,
+            SplitType::Modified(read) => writer.write_alignment_record(&header, &read)?,
+            SplitType::Split(left_read, right_read) => {
+                let left_read_name_ref = left_read.name().unwrap();
+                let left_read_name = std::str::from_utf8(left_read_name_ref.as_ref()).unwrap();
 
-            /*
-            println!("--------------------------------------------------");
-            reads
-                .0
-                .cigar()
-                .iter()
-                .map(|opres| opres.unwrap())
-                .filter_map(|op| op.kind().consumes_read().then_some(op))
-                .for_each(|op| println!("{:?}\t{}", op.kind(), op.len()));
-                */
+                /*
+                println!("--------------------------------------------------");
+                reads
+                    .0
+                    .cigar()
+                    .iter()
+                    .map(|opres| opres.unwrap())
+                    .filter_map(|op| op.kind().consumes_read().then_some(op))
+                    .for_each(|op| println!("{:?}\t{}", op.kind(), op.len()));
+                    */
 
-            let cigar_read_len = reads.0.cigar().read_length();
-            assert!(
-                cigar_read_len == reads.0.sequence().len(),
-                "Read 0: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
-                reads.0.cigar().read_length(),
-                reads.0.sequence().len(),
-                read_name0,
-                reads.0.alignment_start().unwrap().get()
-            );
+                let cigar_read_len = left_read.cigar().read_length();
+                assert!(
+                    cigar_read_len == left_read.sequence().len(),
+                    "Left ead: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
+                    left_read.cigar().read_length(),
+                    left_read.sequence().len(),
+                    left_read_name,
+                    left_read.alignment_start().unwrap().get()
+                );
 
-            let read_name_ref1 = reads.1.name().unwrap();
-            let read_name1 = std::str::from_utf8(read_name_ref1.as_ref()).unwrap();
-            assert!(
-                reads.1.cigar().read_length() == reads.1.sequence().len(),
-                "Read 1: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
-                reads.1.cigar().read_length(),
-                reads.1.sequence().len(),
-                read_name1,
-                reads.1.alignment_start().unwrap().get()
-            );
+                let right_read_name_ref = right_read.name().unwrap();
+                let right_read_name = std::str::from_utf8(right_read_name_ref.as_ref()).unwrap();
+                assert!(
+                    right_read.cigar().read_length() == right_read.sequence().len(),
+                    "Right Read: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
+                    right_read.cigar().read_length(),
+                    right_read.sequence().len(),
+                    right_read_name,
+                    right_read.alignment_start().unwrap().get()
+                );
 
-            // If we get a left and right read then write them separately.
-            writer.write_alignment_record(&header, &reads.0)?;
-            writer.write_alignment_record(&header, &reads.1)?;
-        } else {
-            // Otherwise, we didn't split the read or there was a problem, in which
-            // case just write the original read unchanged.
-            writer.write_alignment_record(&header, &record)?;
+                // If we get a left and right read then write them separately.
+                writer.write_alignment_record(&header, &left_read)?;
+                writer.write_alignment_record(&header, &right_read)?;
+            }
         }
     }
 
@@ -91,36 +102,44 @@ pub fn convert_sam<T>(reader: &mut Reader<Box<dyn BufRead>>, reflen: usize) -> i
     writer.finish(&header)
 }
 
-fn convert_read(
-    record: &impl Record,
-    header: &Header,
-    reflen: usize,
-) -> Option<(RecordBuf, RecordBuf)> {
+fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitType {
     // We are only looking for reads that are longer than `reflen`
     // First get the read alignment end.
     let Some(Ok(record_start)) = record.alignment_start() else {
         let read_name = record.name().expect("UNKNOWN read name!");
 
         log::warn!("Record:{:?} does not have a start.", read_name.as_bytes());
-        return None;
+        return SplitType::Unchanged;
     };
 
     // Remove later.
     let name = record.name().unwrap();
-    let namestr = std::str::from_utf8(name.as_bytes()).unwrap();
+    let name_str = std::str::from_utf8(name.as_bytes()).unwrap();
 
     // Parse the cigar vector to check if we need to split this read.
     let mut left_ref_len: usize = record_start.get();
 
-    // Often to handle a circular chromosome, the reference genome is doubled.
-    // Doing so is a mistake and unnecessary because sometimes the entire 
-    // read will end up aligning entirely in the duplicated reference sequence.
-    // To prevent this situation, the repeated part of the reference genome
-    // should be no more than half of the longest expected read length.
-    assert!(
-        left_ref_len < reflen,
-        "Read: {}, aligns past the reference, logic error. left_ref_len={}, reflen={}.", namestr, left_ref_len, reflen
-    );
+    /* Often to handle a circular chromosome, the reference genome is doubled.
+     * Doing so is a mistake and unnecessary because sometimes the entire
+     * read will end up aligning entirely in the duplicated reference sequence.
+     * To prevent this situation, the repeated part of the reference genome
+     * should be no more than half of the longest expected read length. To deal with
+     * this problem we subtract the reflen.
+     */
+    if left_ref_len >= reflen {
+        log::warn!(
+            "Read: {} has a start alignment: {} beyond reference.",
+            name_str,
+            left_ref_len
+        );
+
+        // Subtract the reflen to reset the proper alignment start.
+        let mut read = RecordBuf::try_from_alignment_record(header, record).unwrap();
+        let record_start = left_ref_len - reflen;
+        *read.alignment_start_mut() = Position::new(record_start);
+
+        return SplitType::Modified(read);
+    }
 
     let mut remaining_len: usize = 0;
     let mut curr_oper_kind = Kind::Skip;
@@ -129,7 +148,6 @@ fn convert_read(
 
     let cigar_vec: Vec<Op> = record.cigar().iter().map(|x| x.ok().unwrap()).collect();
     let mut opiter = cigar_vec.iter();
-
 
     while let Some(oper) = opiter.next() {
         // Do we advance the reference count?
@@ -163,7 +181,7 @@ fn convert_read(
         if oper.kind().consumes_read() {
             sequence_idx += oper.len()
         }
-        
+
         // Add the operator
         left_cigar.push(oper.clone());
     }
@@ -192,7 +210,7 @@ fn convert_read(
 
     // If there's nothing in the right cigar, then there's no split.
     if right_cigar.len() == 0 {
-        return None;
+        return SplitType::Unchanged;
     }
 
     // Now create the left and right reads.
@@ -214,7 +232,7 @@ fn convert_read(
     *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
     *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
 
-    Some((left_read, right_read))
+    SplitType::Split(left_read, right_read)
 }
 
 // TESTING
