@@ -25,6 +25,7 @@ fn main() -> io::Result<()> {
             .arg(
                 Arg::new("output")
                    .short('o')
+                   .required(false)
                    .help("output sam file")
             )
             .arg(
@@ -41,7 +42,7 @@ fn main() -> io::Result<()> {
 
         // Get the output file name
         let mut bufwriter: Box<dyn Write> =
-            if let Some(output_filename) = matches.get_one::<String>("name") {
+            if let Some(output_filename) = matches.get_one::<String>("output") {
                 let output_file = File::create_new(output_filename)?;
 
                 Box::new(BufWriter::new(output_file))
