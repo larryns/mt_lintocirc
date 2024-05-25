@@ -43,13 +43,12 @@ pub fn convert_sam<T>(
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
     let mut writer = Writer::new(bufwriter);
 
+    // Write the header for the SAM
+    writer.write_header(&header)?;
+
     // Loop through the SAM records.
     for result in reader.records(&header) {
         let record = result?;
-
-        // Remove the following 2 lines
-        //let read_name_ref = record.name().unwrap();
-        //let read_name = std::str::from_utf8(read_name_ref.as_bytes()).unwrap();
 
         let read_type = convert_read(&record, &header, reflen);
         match read_type {
