@@ -5,7 +5,7 @@
 //! aligned reads back to an alignment of a circular mtDNA reference.
 
 use bstr::BString;
-use clap::{Arg, Command};
+use clap::{value_parser, Arg, Command};
 use mt_lintocirc::convert_sam;
 use noodles::sam::alignment::Record;
 use noodles_util::alignment::io::reader::Builder;
@@ -38,10 +38,26 @@ fn main() -> io::Result<()> {
             ).arg(
                Arg::new("ref")
                     .short('r')
-                    .long("reference")
+                    .long("ref")
                     .required(true)
                     .help("name of doubled mitochondrial reference") 
-            ).get_matches();
+            ).arg(
+                Arg::new("reflen")
+                .short('l')
+                .long("reflen")
+                .required(false)
+                .default_value("16159")
+                .value_parser(value_parser!(u16))
+                .help("length of reference, default is 16159")
+            ).arg(
+                Arg::new("targetref")
+                .short('t')
+                .long("targetref")
+                .required(false)
+                .default_value("chrM")
+                .help("target reference sequence name")
+            )
+            .get_matches();
 
     if let Some(filename) = matches.get_one::<String>("alignmentfile") {
         log::info!("Processing file: {}", filename);
@@ -61,8 +77,22 @@ fn main() -> io::Result<()> {
         // Get the reference name
         let refname = BString::from(matches.get_one::<String>("ref").unwrap().as_str());
 
+        // Get the target reference name
+        let target_refname =
+            BString::from(matches.get_one::<String>("targetref").unwrap().as_str());
+
+        // Get the reference name
+        let target_reflen = matches.get_one::<usize>("reflen").unwrap();
+
         // Process the bam file
-        convert_sam::<Box<dyn Record>>(&mut reader, 16159, &mut bufwriter, &refname)
+        convert_sam::<Box<dyn Record>>(
+            &mut reader,
+            16159,
+            &mut bufwriter,
+            &refname,
+            target_refname,
+            target_reflen,
+        )
     } else {
         Ok(())
     }

@@ -34,10 +34,6 @@ enum SplitType {
     Split(RecordBuf, RecordBuf),
 }
 
-// The human mitochondrial reference length
-const MT_REF_LEN: usize = 16159;
-const MT_CHR: &str = "chrM";
-
 /// Converts SAM records in an alignment file that were aligned to a
 /// doubled circular reference genome--a reference in which the linear reference
 /// genome is doubled--back to a single copy linear reference genome.
@@ -47,15 +43,17 @@ pub fn convert_sam<T>(
     reflen: usize,
     bufwriter: &mut Box<dyn StdWrite>,
     refname: &BString,
+    target_refname: BString,
+    target_reflen: &usize,
 ) -> io::Result<()> {
     let mut header = reader.read_header()?;
 
     let reference_sequences = header.reference_sequences_mut();
 
     // Create an entry for chrM and add it to the end.
-    let mt_ref_len = NonZeroUsize::new(MT_REF_LEN).unwrap();
+    let mt_ref_len = NonZeroUsize::new(*target_reflen).unwrap();
     let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
-    reference_sequences.insert(BString::from(MT_CHR), mt_refseq);
+    reference_sequences.insert(target_refname, mt_refseq);
 
     // Now replace the existing chrM name with the new one
     reference_sequences.swap_remove(refname);
