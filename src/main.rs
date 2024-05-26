@@ -4,6 +4,7 @@
 //! reference. The next step--accomplished by this program--is to convert the
 //! aligned reads back to an alignment of a circular mtDNA reference.
 
+use bstr::BString;
 use clap::{Arg, Command};
 use mt_lintocirc::convert_sam;
 use noodles::sam::alignment::Record;
@@ -25,6 +26,7 @@ fn main() -> io::Result<()> {
             .arg(
                 Arg::new("output")
                    .short('o')
+                   .long("output")
                    .required(false)
                    .help("output sam file")
             )
@@ -33,6 +35,12 @@ fn main() -> io::Result<()> {
                     .help("The input file to process")
                     .required(true) // Set to false to manually handle missing arguments
                     .index(1),
+            ).arg(
+               Arg::new("ref")
+                    .short('r')
+                    .long("reference")
+                    .required(true)
+                    .help("name of doubled mitochondrial reference") 
             ).get_matches();
 
     if let Some(filename) = matches.get_one::<String>("alignmentfile") {
@@ -50,8 +58,11 @@ fn main() -> io::Result<()> {
                 Box::new(BufWriter::new(std::io::stdout().lock()))
             };
 
+        // Get the reference name
+        let refname = BString::from(matches.get_one::<String>("ref").unwrap().as_str());
+
         // Process the bam file
-        convert_sam::<Box<dyn Record>>(&mut reader, 16159, &mut bufwriter)
+        convert_sam::<Box<dyn Record>>(&mut reader, 16159, &mut bufwriter, &refname)
     } else {
         Ok(())
     }

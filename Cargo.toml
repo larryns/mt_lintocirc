@@ -10,3 +10,4 @@ clap = "4.5.4"
 noodles = { version = "0.72.0", features = ["bam", "core", "sam" ] }
 noodles-util = { version = "0.44.0", features = ["alignment"] }
 log = "0.4"
+bstr = "1.9.1"
