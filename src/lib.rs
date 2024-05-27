@@ -205,6 +205,9 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     // If so, add the right split part of the op to the right cigar.
     let mut right_cigar = Vec::new();
 
+    //LNS
+    eprintln!(">> Remaining len={}", remaining_len);
+
     if remaining_len > 0 {
         right_cigar.push(Op::new(curr_oper_kind, remaining_len));
     }
