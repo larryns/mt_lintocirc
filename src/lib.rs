@@ -44,14 +44,13 @@ pub fn convert_sam<T>(
     bufwriter: &mut Box<dyn StdWrite>,
     refname: &BString,
     target_refname: BString,
-    target_reflen: &usize,
 ) -> io::Result<()> {
     let mut header = reader.read_header()?;
 
     let reference_sequences = header.reference_sequences_mut();
 
     // Create an entry for chrM and add it to the end.
-    let mt_ref_len = NonZeroUsize::new(*target_reflen).unwrap();
+    let mt_ref_len = NonZeroUsize::new(reflen).unwrap();
     let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
     reference_sequences.insert(target_refname, mt_refseq);
 

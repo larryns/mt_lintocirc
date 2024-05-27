@@ -47,8 +47,8 @@ fn main() -> io::Result<()> {
                 .long("reflen")
                 .required(false)
                 .default_value("16569")
-                .value_parser(value_parser!(u16))
-                .help("length of reference, default is 16159")
+                .value_parser(value_parser!(usize))
+                .help("length of reference, default is 16569")
             ).arg(
                 Arg::new("targetref")
                 .short('t')
@@ -82,16 +82,15 @@ fn main() -> io::Result<()> {
             BString::from(matches.get_one::<String>("targetref").unwrap().as_str());
 
         // Get the reference name
-        let target_reflen = matches.get_one::<usize>("reflen").unwrap();
+        let reflen = matches.get_one::<usize>("reflen").unwrap();
 
         // Process the bam file
         convert_sam::<Box<dyn Record>>(
             &mut reader,
-            16159,
+            *reflen,
             &mut bufwriter,
             &refname,
             target_refname,
-            target_reflen,
         )
     } else {
         Ok(())
