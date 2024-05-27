@@ -46,7 +46,7 @@ fn main() -> io::Result<()> {
                 .short('l')
                 .long("reflen")
                 .required(false)
-                .default_value("16159")
+                .default_value("16569")
                 .value_parser(value_parser!(u16))
                 .help("length of reference, default is 16159")
             ).arg(
