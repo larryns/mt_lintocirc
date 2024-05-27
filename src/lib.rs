@@ -224,6 +224,8 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores_mut);
     *left_read.sequence_mut() = RecordBufSequence::from(left_sequence_mut);
 
+    eprintln!("Splitting read 1: {}", name_str);
+
     // If there's nothing in the right cigar, then there's no split.
     if right_cigar.len() == 0 {
         return SplitType::Unchanged;
@@ -238,7 +240,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
     *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
 
-    eprintln!("Splitting read: {}", name_str);
+    eprintln!("Splitting read 2: {}", name_str);
 
     // Also change the read name
     let right_name = String::from(name_str) + "_right";
