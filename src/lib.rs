@@ -8,7 +8,7 @@ use noodles::{
             io::Write,
             record::cigar::{op::Kind, Cigar, Op},
             record_buf::{
-                Cigar as RecordBufCigar, QualityScores as RecordBufQS,
+                Cigar as RecordBufCigar, Name, QualityScores as RecordBufQS,
                 Sequence as RecordBufSequence,
             },
             Record, RecordBuf,
@@ -122,6 +122,9 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     // Parse the cigar vector to check if we need to split this read.
     let mut left_ref_len: usize = record_start.get();
 
+    let name = record.name().unwrap();
+    let name_str = std::str::from_utf8(name.as_bytes()).unwrap();
+
     /* Often to handle a circular chromosome, the reference genome is doubled.
      * Doing so is a mistake and unnecessary because sometimes the entire
      * read will end up aligning entirely in the duplicated reference sequence.
@@ -130,9 +133,6 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
      * with this problem we subtract the reflen.
      */
     if left_ref_len >= reflen {
-        let name = record.name().unwrap();
-        let name_str = std::str::from_utf8(name.as_bytes()).unwrap();
-
         log::warn!(
             "Read: {} has a start alignment: {} beyond reference.",
             name_str,
@@ -226,8 +226,6 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
 
     // If there's nothing in the right cigar, then there's no split.
     if right_cigar.len() == 0 {
-        // LNS
-        //return SplitType::Modified(left_read);
         return SplitType::Unchanged;
     }
 
@@ -239,6 +237,12 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     *right_read.cigar_mut() = RecordBufCigar::from(right_cigar);
     *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
     *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
+
+    eprintln!("Splitting read: {}", name_str);
+
+    // Also change the read name
+    let right_name = String::from(name_str) + "_right";
+    *right_read.name_mut() = Some(Name::from(right_name.as_bytes()));
 
     SplitType::Split(left_read, right_read)
 }
