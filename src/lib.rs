@@ -147,7 +147,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
         return SplitType::Modified(read);
     }
 
-    let mut remaining_len: usize = 0;
+    let mut remaining_len: usize = 0; // remaining_len is only used when there's a split
     let mut curr_oper_kind = Kind::Skip;
     let mut left_cigar = Vec::new();
     let mut sequence_idx: usize = 0; // Used to index the sequence/qual scores
@@ -205,9 +205,6 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     // If so, add the right split part of the op to the right cigar.
     let mut right_cigar = Vec::new();
 
-    //LNS
-    eprintln!(">> Remaining len={}", remaining_len);
-
     if remaining_len > 0 {
         right_cigar.push(Op::new(curr_oper_kind, remaining_len));
     }
@@ -227,8 +224,6 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores_mut);
     *left_read.sequence_mut() = RecordBufSequence::from(left_sequence_mut);
 
-    eprintln!("Splitting read 1: {}", name_str);
-
     // If there's nothing in the right cigar, then there's no split.
     if right_cigar.len() == 0 {
         return SplitType::Unchanged;
@@ -242,8 +237,6 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     *right_read.cigar_mut() = RecordBufCigar::from(right_cigar);
     *right_read.quality_scores_mut() = RecordBufQS::from(right_quality_scores);
     *right_read.sequence_mut() = RecordBufSequence::from(right_sequence);
-
-    eprintln!("Splitting read 2: {}", name_str);
 
     // Also change the read name
     let right_name = String::from(name_str) + "_right";
@@ -347,31 +340,43 @@ mod tests {
             .set_sequence(RecordBufSequence::from(sequence))
             .build();
 
-        let (left_read, right_read) = convert_read(&sam_record, &header, REF_LEN).unwrap();
-
-        // Check the parameters of the left and right reads.
-        assert!(
-            left_read.sequence().as_ref()
-                == b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
-                "left_read sequence mismatch, sequence={:?}, len={}", left_read.sequence().as_ref(), left_read.sequence().len()
-        );
-        assert!(
-            right_read.sequence().as_ref() == b"NACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA",
-            "right_read sequence mismatch, sequence={:?}, len={}",
-            right_read.sequence().as_ref(),
-            right_read.sequence().len()
-        );
-        assert!(
-            left_read.quality_scores().as_ref() == b"0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDE",
-            "left_read quality mismatch, quality scores={:?}", 
-            left_read.quality_scores().as_ref()
-        );
-        assert!(
-            right_read.quality_scores().as_ref()
-                == b"!FGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@AB",
-            "right_read quality mismatch, quality scores={:?}",
-            right_read.quality_scores().as_ref()
-        );
+        let read_type = convert_read(&sam_record, &header, REF_LEN);
+        let result = match read_type {
+            SplitType::Unchanged => false,
+            SplitType::Modified(_) => false,
+            SplitType::Split(left_read, right_read) => {
+                // Check the parameters of the left and right reads.
+                assert!(
+                    left_read.sequence().as_ref()
+                        == b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+                        "left_read sequence mismatch, sequence={:?}, len={}", left_read.sequence().as_ref(), left_read.sequence().len()
+                );
+                assert!(
+                    right_read.sequence().as_ref()
+                        == b"NACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTA",
+                    "right_read sequence mismatch, sequence={:?}, len={}",
+                    right_read.sequence().as_ref(),
+                    right_read.sequence().len()
+                );
+                assert!(
+                    left_read.quality_scores().as_ref() == b"0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@ABCDE",
+                    "left_read quality mismatch, quality scores={:?}", 
+                    left_read.quality_scores().as_ref()
+                );
+                assert!(
+                    right_read.quality_scores().as_ref()
+                        == b"!FGHI0123456789:;<=>?@ABCDEFGHI0123456789:;<=>?@AB",
+                    "right_read quality mismatch, quality scores={:?}",
+                    right_read.quality_scores().as_ref()
+                );
+                assert!(
+                    right_read.alignment_start() == Position::new(1),
+                    "right read does not start at 1"
+                );
+                true
+            }
+        };
+        assert!(result, "Read not split!");
 
         Ok(())
     }
@@ -449,7 +454,10 @@ mod tests {
             .build();
 
         let result = convert_read(&sam_record, &header, REF_LEN);
-        assert!(result.is_none(), "Result is not none.");
+        assert!(
+            matches!(result, SplitType::Unchanged),
+            "Result is not none."
+        );
 
         Ok(())
     }
