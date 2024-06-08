@@ -13,6 +13,15 @@ linearized chromosome. In some cases, the transformation will involve splitting 
 mtDNA. The name of the right half of the read is changed by adding the suffix *_right*, so that the read names are not duplicated. This 
 program was designed with HiFi/long reads in mind, so only single end reads are handled. There is no support for paired-end reads.
 
+## Building
+
+There's a Dockerfile for those comfortable with Docker. Alternatively, download and install [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html). Then 
+```
+1. git clone https://github.com/larryns/mt_lintocirc
+2. cd mt_lintocirc
+3. cargo install --root <installation bindir> --path .
+```
+
 ## Usage
 
 ```
@@ -23,3 +32,5 @@ mt_lintocirc
     --reflen <length of linear reference, default is 16569>
     --targetref <output target reference name, default is chrM>
 ```
+
+Please let me know if this utility is useful to you.
