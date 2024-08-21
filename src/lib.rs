@@ -49,13 +49,16 @@ pub fn convert_sam<T>(
 
     let reference_sequences = header.reference_sequences_mut();
 
-    // Create an entry for chrM and add it to the end.
-    let mt_ref_len = NonZeroUsize::new(reflen).unwrap();
-    let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
-    reference_sequences.insert(target_refname, mt_refseq);
+    // Create an entry for chrM and add it to the end, but only if refname and target_refname are different.
+    // Note that if the names don't change, we do not chagne or check the reflen. The old reflen is used.
+    if target_refname != *refname {
+        let mt_ref_len = NonZeroUsize::new(reflen).unwrap();
+        let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
+        reference_sequences.insert(target_refname, mt_refseq);
 
-    // Now replace the existing chrM name with the new one
-    reference_sequences.swap_remove(refname);
+        // Now replace the existing chrM name with the new one
+        reference_sequences.swap_remove(refname);
+    }
 
     // Open a writer to stdout. We want to lock stdout to explicitly control stdout buffering.
     let mut writer = Writer::new(bufwriter);
