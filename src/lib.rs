@@ -77,30 +77,6 @@ pub fn convert_sam<T>(
             SplitType::Unchanged => writer.write_alignment_record(&header, &record)?,
             SplitType::Modified(read) => writer.write_alignment_record(&header, &read)?,
             SplitType::Split(left_read, right_read) => {
-                let left_read_name_ref = left_read.name().unwrap();
-                let left_read_name = std::str::from_utf8(left_read_name_ref.as_ref()).unwrap();
-
-                let cigar_read_len = left_read.cigar().read_length();
-                assert!(
-                    cigar_read_len == left_read.sequence().len(),
-                    "Left ead: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
-                    left_read.cigar().read_length(),
-                    left_read.sequence().len(),
-                    left_read_name,
-                    left_read.alignment_start().unwrap().get()
-                );
-
-                let right_read_name_ref = right_read.name().unwrap();
-                let right_read_name = std::str::from_utf8(right_read_name_ref.as_ref()).unwrap();
-                assert!(
-                    right_read.cigar().read_length() == right_read.sequence().len(),
-                    "Right Read: Cigar length: {} read length: {} mismatch, read: {}, alignment start: {}",
-                    right_read.cigar().read_length(),
-                    right_read.sequence().len(),
-                    right_read_name,
-                    right_read.alignment_start().unwrap().get()
-                );
-
                 // If we get a left and right read then write them separately.
                 writer.write_alignment_record(&header, &left_read)?;
                 writer.write_alignment_record(&header, &right_read)?;
@@ -113,11 +89,11 @@ pub fn convert_sam<T>(
 }
 
 fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitType {
+    let read_name = record.name().expect("UNKNOWN read name!");
+
     // We are only looking for reads that are longer than `reflen`
     // First get the read alignment end.
     let Some(Ok(record_start)) = record.alignment_start() else {
-        let read_name = record.name().expect("UNKNOWN read name!");
-
         log::warn!("Record:{:?} does not have a start.", read_name);
         return SplitType::Unchanged;
     };
@@ -196,15 +172,40 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     }
 
     // Update the sequence and the quality scores for the left read.
-    // Trim the sequence
-    let mut left_sequence_mut: Vec<u8> = record.sequence().iter().collect();
-    let right_sequence = left_sequence_mut.split_off(sequence_idx);
+    // Trim the sequence. In minimap2 if the alignment is a secondary alignment,
+    // then there is no sequence in the secondary alignment, so nothing to split.
+    let (left_sequence, right_sequence, left_quality_scores, right_quality_scores) =
+        if record.sequence().len() == 0 {
+            assert_eq!(
+                record.quality_scores().len(),
+                0,
+                "Sequence for read: {} has length 0, but quality scores exist.",
+                read_name
+            );
 
-    // Trim the quality scores
-    let mut left_quality_scores_mut: Vec<u8> = record.quality_scores().iter().collect();
-    let right_quality_scores: Vec<u8> = left_quality_scores_mut.split_off(sequence_idx);
+            assert!(
+                record.flags().unwrap().is_secondary(),
+                "Sequence for read: {} has length 0, but is NOT a secondary alignment.",
+                read_name
+            );
+            (
+                Vec::<u8>::new(),
+                Vec::<u8>::new(),
+                Vec::<u8>::new(),
+                Vec::<u8>::new(),
+            )
+        } else {
+            // Trim the sequences and quality scores
+            let mut left_seq_mut: Vec<u8> = record.sequence().iter().collect();
+            let right_seq = left_seq_mut.split_off(sequence_idx);
 
-    // We're done with the left cigar. Check if there wa a split operator.
+            let mut left_qs_mut: Vec<u8> = record.quality_scores().iter().collect();
+            let right_qs: Vec<u8> = left_qs_mut.split_off(sequence_idx);
+
+            (left_seq_mut, right_seq, left_qs_mut, right_qs)
+        };
+
+    // We're done with the left cigar. Check if there was a split operator.
     // If so, add the right split part of the op to the right cigar.
     let mut right_cigar = Vec::new();
 
@@ -224,8 +225,8 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     // Update the relevant changes in the read.
     *left_read.alignment_start_mut() = Some(record_start);
     *left_read.cigar_mut() = RecordBufCigar::from(left_cigar);
-    *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores_mut);
-    *left_read.sequence_mut() = RecordBufSequence::from(left_sequence_mut);
+    *left_read.quality_scores_mut() = RecordBufQS::from(left_quality_scores);
+    *left_read.sequence_mut() = RecordBufSequence::from(left_sequence);
 
     // If there's nothing in the right cigar, then there's no split.
     if right_cigar.len() == 0 {
