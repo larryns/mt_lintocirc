@@ -8,7 +8,7 @@ use noodles::{
             io::Write,
             record::cigar::{op::Kind, Cigar, Op},
             record_buf::{
-                Cigar as RecordBufCigar, Name, QualityScores as RecordBufQS,
+                Cigar as RecordBufCigar, QualityScores as RecordBufQS,
                 Sequence as RecordBufSequence,
             },
             Record, RecordBuf,
@@ -115,7 +115,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     let Some(Ok(record_start)) = record.alignment_start() else {
         let read_name = record.name().expect("UNKNOWN read name!");
 
-        log::warn!("Record:{:?} does not have a start.", read_name.as_bytes());
+        log::warn!("Record:{:?} does not have a start.", read_name);
         return SplitType::Unchanged;
     };
 
@@ -123,7 +123,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
     let mut left_ref_len: usize = record_start.get();
 
     let name = record.name().unwrap();
-    let name_str = std::str::from_utf8(name.as_bytes()).unwrap();
+    let name_str = std::str::from_utf8(name).unwrap();
 
     /* Often to handle a circular chromosome, the reference genome is doubled.
      * Doing so is a mistake and unnecessary because sometimes the entire
@@ -240,7 +240,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
 
     // Also change the read name
     let right_name = String::from(name_str) + "_right";
-    *right_read.name_mut() = Some(Name::from(right_name.as_bytes()));
+    *right_read.name_mut() = Some(right_name.into());
 
     SplitType::Split(left_read, right_read)
 }
@@ -251,6 +251,7 @@ fn convert_read(record: &impl Record, header: &Header, reflen: usize) -> SplitTy
 mod tests {
     use super::*;
 
+    use bstr::ByteSlice;
     use noodles::core::Position;
     use noodles::sam::{
         alignment::{
@@ -259,7 +260,7 @@ mod tests {
                 data::field::Tag,
                 MappingQuality,
             },
-            record_buf::{data::field::Value, Name, RecordBuf},
+            record_buf::{data::field::Value, RecordBuf},
         },
         header::record::value::{
             map::{Program, ReferenceSequence},
@@ -333,7 +334,7 @@ mod tests {
             .set_alignment_start(Position::new(record_start).unwrap())
             .set_reference_sequence_id(0)
             .set_mapping_quality(MappingQuality::MIN)
-            .set_name(Name::from(b"Read1"))
+            .set_name(b"Read1".as_bstr())
             .set_template_length(100)
             .set_quality_scores(RecordBufQS::from(quality_scores))
             .set_cigar(cigar)
@@ -446,7 +447,7 @@ mod tests {
             .set_alignment_start(Position::new(record_start).unwrap())
             .set_reference_sequence_id(0)
             .set_mapping_quality(MappingQuality::MIN)
-            .set_name(Name::from(b"Read1"))
+            .set_name(b"Read1".as_bstr())
             .set_template_length(100)
             .set_quality_scores(RecordBufQS::from(quality_scores))
             .set_cigar(cigar)
