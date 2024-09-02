@@ -50,13 +50,16 @@ pub fn convert_sam<T>(
     let reference_sequences = header.reference_sequences_mut();
 
     // Create an entry for chrM and add it to the end, but only if refname and target_refname are different.
-    // Note that if the names don't change, we do not chagne or check the reflen. The old reflen is used.
-    if target_refname != *refname {
-        let mt_ref_len = NonZeroUsize::new(reflen).unwrap();
-        let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
-        reference_sequences.insert(target_refname, mt_refseq);
+    // Note that if the names don't change, we do not chagne or check the reflen.
+    let mt_ref_len = NonZeroUsize::new(reflen).unwrap();
+    let mt_refseq = Map::<ReferenceSequence>::new(mt_ref_len);
 
-        // Now replace the existing chrM name with the new one
+    // If the target_refname is the same as refname, the value is simply updated. If not,
+    // a new entry is inserted and None is returned.
+    if reference_sequences
+        .insert(target_refname, mt_refseq)
+        .is_none()
+    {
         reference_sequences.swap_remove(refname);
     }
 
